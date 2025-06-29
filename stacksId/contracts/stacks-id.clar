@@ -288,3 +288,184 @@
         (ok true)
     )
 )
+
+;; Reputation Events
+(define-map reputation-events
+    { event-id: uint }
+    {
+        identity-id: uint,
+        event-type: (string-ascii 32),
+        reputation-change: int,
+        verifier: principal,
+        timestamp: uint,
+        data-hash: (string-ascii 64),
+    }
+)
+
+(define-data-var next-event-id uint u1)
+
+;; Event Types and Their Reputation Values
+(define-map reputation-weights
+    { event-type: (string-ascii 32) }
+    { weight: int }
+)
+
+;; Initialize reputation weights
+(map-set reputation-weights { event-type: "github-contribution" } { weight: 10 })
+(map-set reputation-weights { event-type: "peer-review" } { weight: 25 })
+(map-set reputation-weights { event-type: "governance-vote" } { weight: 5 })
+(map-set reputation-weights { event-type: "skill-verification" } { weight: 50 })
+(map-set reputation-weights { event-type: "community-contribution" } { weight: 15 })
+(map-set reputation-weights { event-type: "education-completion" } { weight: 100 })
+
+;; Reputation Mining Functions
+(define-public (record-reputation-event
+        (identity-id uint)
+        (event-type (string-ascii 32))
+        (data-hash (string-ascii 64))
+    )
+    (let (
+            (event-id (var-get next-event-id))
+            (identity-data (unwrap! (get-identity identity-id) ERR_IDENTITY_NOT_FOUND))
+            (reputation-weight (default-to 0
+                (get weight
+                    (map-get? reputation-weights { event-type: event-type })
+                )))
+        )
+        ;; Check if caller is authorized (trusted issuer, identity owner, or contract owner)
+        (asserts!
+            (or
+                (is-trusted-issuer tx-sender)
+                (is-eq tx-sender (get owner identity-data))
+                (is-eq tx-sender (var-get contract-owner))
+            )
+            ERR_UNAUTHORIZED
+        )
+        ;; Record reputation event
+        (map-set reputation-events { event-id: event-id } {
+            identity-id: identity-id,
+            event-type: event-type,
+            reputation-change: reputation-weight,
+            verifier: tx-sender,
+            timestamp: stacks-block-height,
+            data-hash: data-hash,
+        })
+        ;; Update identity reputation score
+        (map-set identities { identity-id: identity-id }
+            (merge identity-data {
+                reputation-score: (+ (get reputation-score identity-data)
+                    (to-uint reputation-weight)
+                ),
+                updated-at: stacks-block-height,
+            })
+        )
+        ;; Increment event counter
+        (var-set next-event-id (+ event-id u1))
+        (ok event-id)
+    )
+)
+
+(define-public (update-reputation-weight
+        (event-type (string-ascii 32))
+        (weight int)
+    )
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_UNAUTHORIZED)
+        (map-set reputation-weights { event-type: event-type } { weight: weight })
+        (ok true)
+    )
+)
+
+;; Verification and Query Functions
+(define-read-only (get-reputation-score (identity-id uint))
+    (default-to u0 (get reputation-score (get-identity identity-id)))
+)
+
+(define-read-only (meets-reputation-threshold (identity-id uint))
+    (>= (get-reputation-score identity-id) (var-get min-reputation-threshold))
+)
+
+(define-read-only (get-reputation-event (event-id uint))
+    (map-get? reputation-events { event-id: event-id })
+)
+
+(define-read-only (get-reputation-weight (event-type (string-ascii 32)))
+    (get weight (map-get? reputation-weights { event-type: event-type }))
+)
+
+;; Identity Verification Based on Reputation
+(define-public (verify-identity-by-reputation (identity-id uint))
+    (let ((identity-data (unwrap! (get-identity identity-id) ERR_IDENTITY_NOT_FOUND)))
+        ;; Check if caller is authorized
+        (asserts!
+            (or
+                (is-trusted-issuer tx-sender)
+                (is-eq tx-sender (var-get contract-owner))
+            )
+            ERR_UNAUTHORIZED
+        )
+        ;; Check if meets reputation threshold
+        (asserts! (meets-reputation-threshold identity-id)
+            ERR_INSUFFICIENT_REPUTATION
+        )
+        ;; Verify identity
+        (map-set identities { identity-id: identity-id }
+            (merge identity-data {
+                is-verified: true,
+                updated-at: stacks-block-height,
+            })
+        )
+        (ok true)
+    )
+)
+
+;; Governance Functions
+(define-public (set-reputation-threshold (new-threshold uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_UNAUTHORIZED)
+        (var-set min-reputation-threshold new-threshold)
+        (ok true)
+    )
+)
+
+(define-public (transfer-ownership (new-owner principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_UNAUTHORIZED)
+        (var-set contract-owner new-owner)
+        (ok true)
+    )
+)
+
+;; Cross-Platform Integration APIs
+(define-read-only (verify-identity-api (identity-id uint))
+    (match (get-identity identity-id)
+        identity
+        {
+            exists: true,
+            is-verified: (get is-verified identity),
+            reputation-score: (get reputation-score identity),
+            meets-threshold: (meets-reputation-threshold identity-id),
+        }
+        {
+            exists: false,
+            is-verified: false,
+            reputation-score: u0,
+            meets-threshold: false,
+        }
+    )
+)
+
+(define-read-only (bulk-verify-credentials
+        (identity-id uint)
+        (credential-types (list 10 (string-ascii 32)))
+    )
+    (map has-valid-credential
+        (list
+            identity-id             identity-id             identity-id
+            identity-id             identity-id
+            identity-id             identity-id             identity-id
+            identity-id             identity-id
+        )
+        credential-types
+    )
+)
